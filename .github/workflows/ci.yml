@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest httpx
+
+      - name: Train model (fails if below the quality gate)
+        run: python -m foodwaste.train
+
+      - name: Run tests (data validation, model, API, drift)
+        run: pytest -v
+
+      - name: Drift check on simulated normal data
+        run: python -m foodwaste.drift --simulate normal --fail-on-drift
+
+      - name: Upload model + metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: model
+          path: |
+            models/metrics.json
+            models/confusion_matrix.png
+            reports/
+
+  docker:
+    needs: test-and-train
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (trains model inside)
+        run: docker build -t food-waste-api .
+
+      - name: Smoke test the container
+        run: |
+          docker run -d -p 8000:8000 --name api food-waste-api
+          for i in $(seq 1 30); do curl -sf localhost:8000/health && break; sleep 1; done
+          curl -sf -X POST localhost:8000/predict -H "Content-Type: application/json" \
+            -d '{"Date":"2025-07-14","Business_Type":"Restaurant","Food_Category":"Prepared Food","Purchase_Quantity":180,"Shelf_Life_Days":1,"Storage_Temperature":24,"Daily_Demand":110,"Promotion":"No","Weather":"Rainy"}'
